@@ -4,12 +4,18 @@ import { ACCOUNT_PROFILES, type AccountId } from "./accounts";
 import { sb } from "./sb";
 
 const GRAPH = "https://graph.instagram.com/v23.0";
+// Unified login(새 Meta 앱)의 시스템 사용자 토큰은 graph.facebook.com에서만 쓰이고, 계정은 /me 대신 인스타 ID로 부른다.
+export const FB_GRAPH = "https://graph.facebook.com/v27.0";
 const HOUR = 3600_000;
 
 type Row = Record<string, unknown>;
 
+/** Instagram 로그인 토큰은 "IG"로 시작한다. 그 밖(EAA…)은 페이스북 로그인(Unified login) 토큰. */
+export const isInstagramToken = (token: string) => token.startsWith("IG");
+
 async function ig<T>(path: string, token: string, params: Record<string, string> = {}): Promise<T> {
-  const url = new URL(path.startsWith("http") ? path : `${GRAPH}${path}`);
+  const base = isInstagramToken(token) ? GRAPH : FB_GRAPH;
+  const url = new URL(path.startsWith("http") ? path : `${base}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("access_token", token);
   const res = await fetch(url, { cache: "no-store", redirect: "error", signal: AbortSignal.timeout(15000) });
@@ -20,10 +26,13 @@ async function ig<T>(path: string, token: string, params: Record<string, string>
   return (await res.json()) as T;
 }
 
-export function instagramIdentity(token: string) {
-  return ig<{ username?: string; user_id?: string; id?: string; followers_count?: number }>("/me", token, {
-    fields: "user_id,username,followers_count",
-  });
+export function instagramIdentity(token: string, igUserId?: string | null) {
+  type Identity = { username?: string; user_id?: string; id?: string; followers_count?: number };
+  if (!isInstagramToken(token)) {
+    if (!igUserId) throw new Error("no_ig_user_id");
+    return ig<Identity>(`/${igUserId}`, token, { fields: "id,username,followers_count" });
+  }
+  return ig<Identity>("/me", token, { fields: "user_id,username,followers_count" });
 }
 
 export interface AccountResult {
@@ -45,7 +54,8 @@ async function ensureToken(handle: string, id: AccountId): Promise<{ token: stri
   let expires = (rows[0]?.expires_at as string | null | undefined) ?? null;
   if (!token) return null;
 
-  const soon = !expires || +new Date(expires) - Date.now() < 20 * 24 * HOUR;
+  // Unified login 토큰은 기본 만료 없음, 갱신 API도 없다 → 갱신하지 않는다
+  const soon = isInstagramToken(token) && (!expires || +new Date(expires) - Date.now() < 20 * 24 * HOUR);
   if (soon) {
     try {
       const r = await ig<{ access_token: string; expires_in: number }>("https://graph.instagram.com/refresh_access_token", token, { grant_type: "ig_refresh_token" });
@@ -94,14 +104,15 @@ export function checkpointFor(ageMs: number): "24h" | "72h" | "7d" | null {
 
 async function collectOne(id: AccountId, handle: string): Promise<AccountResult> {
   const base = { account: id, handle };
-  const acct = (await sb<Row[]>("ig_accounts", { params: { handle: `eq.${handle}`, select: "id" } }))[0];
+  const acct = (await sb<Row[]>("ig_accounts", { params: { handle: `eq.${handle}`, select: "id,ig_user_id" } }))[0];
   if (!acct) return { ...base, ok: false, error: "no_account_row (migration 003 필요)" };
 
   const t = await ensureToken(handle, id);
   if (!t) return { ...base, ok: false, error: "no_token" };
 
   try {
-    const me = await instagramIdentity(t.token);
+    const igUserId = (acct.ig_user_id as string | null) ?? null;
+    const me = await instagramIdentity(t.token, igUserId);
     if (me.username?.toLowerCase() !== handle.toLowerCase()) throw new Error("instagram_account_mismatch");
     await sb("ig_accounts", {
       method: "PATCH",
@@ -110,7 +121,7 @@ async function collectOne(id: AccountId, handle: string): Promise<AccountResult>
       body: { ig_user_id: me.user_id ?? me.id ?? null, followers: me.followers_count ?? null, status: "connected", token_expires_at: t.expires_at },
     });
 
-    const media = await ig<{ data: { id: string; caption?: string; media_product_type?: string; permalink: string; timestamp: string }[] }>("/me/media", t.token, {
+    const media = await ig<{ data: { id: string; caption?: string; media_product_type?: string; permalink: string; timestamp: string }[] }>(isInstagramToken(t.token) ? "/me/media" : `/${me.id ?? igUserId}/media`, t.token, {
       fields: "id,caption,media_product_type,permalink,timestamp",
       limit: "50",
     });

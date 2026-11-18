@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { ACCOUNT_PROFILES } from "@/lib/accounts";
-import { CALLBACK, instagramOAuthConfig, SCOPES, STATE_COOKIE } from "@/lib/instagramOAuth";
+import { CALLBACK, instagramOAuthConfig, loginUrl, STATE_COOKIE } from "@/lib/instagramOAuth";
 
 export async function GET(req: Request) {
   const config = instagramOAuthConfig();
@@ -10,12 +10,8 @@ export async function GET(req: Request) {
   if (!account) return NextResponse.json({ error: "invalid_account" }, { status: 400 });
 
   const state = randomBytes(32).toString("base64url");
-  const login = new URL("https://www.instagram.com/oauth/authorize");
-  login.search = new URLSearchParams({
-    client_id: config.appId, redirect_uri: config.redirectUri, response_type: "code",
-    scope: SCOPES.join(","), state, enable_fb_login: "0", force_authentication: "1",
-  }).toString();
-  const response = NextResponse.redirect(login);
+  // Unified login이면 페이스북 로그인 창(config_id), 아니면 예전 인스타 로그인 창
+  const response = NextResponse.redirect(loginUrl(config, state));
   response.cookies.set(STATE_COOKIE, `${state}.${account.id}`, {
     path: CALLBACK, maxAge: 600, httpOnly: true, secure: config.secure, sameSite: "lax",
   });
